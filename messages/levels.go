@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"context"
 	"fmt"
 	"math/rand/v2"
 	"sync"
@@ -351,5 +352,190 @@ func LevelSeven() {
 
 	for result := range resultsChan {
 		fmt.Printf("Result: %+v\n", result)
+	}
+}
+
+// streamMessages should basically take a value called rate, that rate will basically
+// say that stream messages at this x rate. So if the value of rate is 10, then we
+// send a stream of 10 messages only.
+func (m *Message) streamMessages(rate int, resultChan chan<- Message, ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	interval := time.Second / time.Duration(rate)
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+
+	counter := 0
+
+	for {
+		select {
+		case <-tick.C:
+			message := Message{
+				ID:    counter,
+				Value: fmt.Sprintf("streamed-msg-%d", time.Now().UnixNano()),
+			}
+			select {
+			case resultChan <- message:
+			case <-ctx.Done():
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func LevelEight() {
+	startTime := time.Now()
+	m := NewMessages()
+
+	var wgStream sync.WaitGroup
+	// Chan handling
+	ctx := context.Background()
+	streamMessagesChan := make(chan Message)
+
+	wgStream.Add(1)
+	go m.streamMessages(10, streamMessagesChan, ctx, &wgStream)
+	go func() {
+		wgStream.Wait()
+		close(streamMessagesChan)
+	}()
+
+	// Start pipeline with backpressure (by using buffered channels)
+	stageOneResult := make(chan Message, 2)
+	stageTwoResult := make(chan Message, 2)
+	stageThreeResult := make(chan Message, 2)
+	finalStageResult := make(chan Message, 2)
+
+	// A single goroutine for each stage (means we only need a snigle wait group to
+	// handle this)
+	var wg sync.WaitGroup
+
+	wg.Add(4) // 4 stages for 4 goroutines
+	go stageOne(streamMessagesChan, stageOneResult, ctx, &wg)
+	go stageTwo(stageOneResult, stageTwoResult, ctx, &wg)
+	go stageThree(stageTwoResult, stageThreeResult, ctx, &wg)
+	go stageFour(stageThreeResult, finalStageResult, ctx, &wg)
+
+	processed := 0
+	for msg := range finalStageResult {
+		processed++
+		elapsed := time.Since(startTime).Seconds()
+		currentRate := float64(processed) / elapsed
+
+		fmt.Printf("Result: %+v (Processed: %d, Current rate: %.2f/sec)\n",
+			msg, processed, currentRate)
+	}
+}
+
+func LevelNine() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const maxQueueSize = 250
+	const initialWorkers = 3
+	const maxWorkers = 20
+	const scaleCheckInterval = 2 * time.Second
+	const messageStreamingRate = 100
+	const workRate = 50
+
+	queue := newQueue(maxQueueSize)
+	pool := newPool(initialWorkers, maxWorkers)
+
+	msgChan := make(chan Message)
+	resultChan := make(chan Message)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	m := NewMessages()
+	go m.streamMessages(messageStreamingRate, msgChan, ctx, &wg)
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Monitor queue and handle scaling
+	go func() {
+		ticker := time.NewTicker(scaleCheckInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				queueDepth := queue.depth()
+				queuePercent := float64(queueDepth) / float64(maxQueueSize)
+
+				fmt.Printf("Queue status: %d/%d (%.1f%%)\n",
+					queueDepth, maxQueueSize, queuePercent*100)
+
+				if queue.shouldScaleUp() {
+					added := pool.scaleUp(2)
+					if added > 0 {
+						fmt.Printf("Scaled up by %d workers\n", added)
+					}
+				}
+
+			case <-ctx.Done():
+				fmt.Printf("Context cancelled\n")
+				return
+			}
+		}
+	}()
+
+	// Put messages to queue
+	go func() {
+		select {
+		case msg := <-msgChan:
+			fmt.Printf("Pushing message\n")
+			queue.push(msg)
+
+		case <-ctx.Done():
+			fmt.Printf("Context cancelled\n")
+			return
+		}
+	}()
+
+	// Process messages
+	go func() {
+		for {
+			msg, ok := queue.pop()
+			if !ok {
+				continue
+			}
+
+			pool.taskQueue <- func() {
+				processed := m.processStringIntesive(workRate, msg)
+				resultChan <- processed
+			}
+
+			select {
+			case <-ctx.Done():
+				fmt.Printf("Context cancelled\n")
+				return
+			default:
+			}
+		}
+	}()
+
+	// Process result
+	processed := 0
+	startTime := time.Now()
+
+	for {
+		select {
+		case result := <-resultChan:
+			processed++
+
+			elapsed := time.Since(startTime).Seconds()
+			rate := float64(processed) / elapsed
+
+			fmt.Printf("Processed: %d, Rate: %.2f/sec\n", processed, rate)
+			fmt.Printf("Result: %+v\n", result)
+
+		case <-ctx.Done():
+			fmt.Printf("Context cancelled")
+			return
+		}
 	}
 }

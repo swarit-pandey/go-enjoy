@@ -2,6 +2,7 @@ package messages
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -107,4 +108,49 @@ func (m *Message) limitedWorker(id int, jobs <-chan Message, result chan<- Messa
 		val = fmt.Sprintf("processed-%s", val)
 		result <- Message{ID: id, Value: val}
 	}
+}
+
+func (m *Message) processStringIntesive(iterations int, input Message) Message {
+	parts := strings.Split(input.Value, "-")
+	if len(parts) < 3 {
+		return Message{}
+	}
+
+	timestamp := parts[len(parts)-1]
+
+	// Do some CPU-intensive work based on workFactor
+	resultTemp := timestamp
+	for i := 0; i < iterations; i++ {
+		// Multiple string operations:
+		// 1. Reverse the string
+		runes := []rune(resultTemp)
+		for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+			runes[i], runes[j] = runes[j], runes[i]
+		}
+
+		// 2. XOR each character with a varying value
+		for j := range runes {
+			runes[j] = runes[j] ^ rune((j*i)%16)
+		}
+
+		// 3. Compute a rolling hash
+		hash := uint32(17)
+		for _, c := range runes {
+			hash = hash*23 + uint32(c)
+		}
+
+		// 4. Append hash to result
+		resultTemp = string(runes) + fmt.Sprintf("-%x", hash)
+
+		// 5. Take a portion of the new string for next iteration
+		if len(resultTemp) > 20 {
+			resultTemp = resultTemp[:20]
+		}
+	}
+
+	msgResult := Message{
+		Value: fmt.Sprintf("%s-processed-%s", parts[0], resultTemp),
+	}
+
+	return msgResult
 }
